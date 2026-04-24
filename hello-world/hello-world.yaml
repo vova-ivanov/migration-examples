@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Hello World - Lambda with API Gateway HTTP API
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # IAM
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "hello-world-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Compute
+  HelloFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "hello-world-lambda-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "body": "Hello, World!"
+              }
+
+  # API Gateway HTTP API
+  # Lambda Function URLs with AuthType=NONE are blocked by account-level
+  # Lambda Block Public Access (RestrictPublicResource). API Gateway uses
+  # IAM-authenticated Lambda invocations internally, bypassing this restriction.
+  HelloApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "hello-world-api-${Environment}"
+      ProtocolType: HTTP
+
+  HelloIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HelloApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HelloFunction.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  HelloRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HelloApi
+      RouteKey: "GET /"
+      Target: !Sub "integrations/${HelloIntegration}"
+
+  HelloStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HelloApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  HelloApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt HelloFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HelloApi}/*/*/*"
+
+Outputs:
+  FunctionName:
+    Value: !Ref HelloFunction
+  ApiEndpoint:
+    Value: !Sub "https://${HelloApi}.execute-api.${AWS::Region}.amazonaws.com/"
+    Description: "curl https://${HelloApi}.execute-api.${AWS::Region}.amazonaws.com/"

@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: API Gateway Lambda authorizer — validates Bearer tokens via the auth handler
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  AuthHandlerArn:
+    Type: String
+    Description: ARN of the auth handler Lambda
+
+  UserPoolId:
+    Type: String
+    Description: Cognito User Pool ID for token validation
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  # ── Authorizer Lambda — thin wrapper around auth-handler ─────────────────────
+
+  AuthorizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-authorizer-${Environment}"
+      RetentionInDays: 14
+
+  AuthorizerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AuthorizerLogGroup
+    Properties:
+      FunctionName: !Sub "app-authorizer-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/app-auth-lambda-${Environment}"
+      MemorySize: 128
+      Timeout: 5
+      Environment:
+        Variables:
+          ENV: !Ref Environment
+          USER_POOL_ID: !Ref UserPoolId
+          TOKEN_CACHE_TTL: "300"
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import time
+          import urllib.request
+          import base64
+
+          USER_POOL_ID = os.environ["USER_POOL_ID"]
+          REGION       = os.environ.get("AWS_REGION", "us-east-1")
+          CACHE_TTL    = int(os.environ.get("TOKEN_CACHE_TTL", "300"))
+
+          # Simple in-memory cache — shared across warm invocations
+          _cache: dict[str, tuple[dict, float]] = {}
+
+
+          def handler(event, context):
+              token = _extract_token(event)
+              if not token:
+                  raise Exception("Unauthorized")
+
+              # Check cache
+              cached = _cache.get(token)
+              if cached and time.time() < cached[1]:
+                  claims = cached[0]
+              else:
+                  claims = _validate_token(token)
+                  if not claims:
+                      raise Exception("Unauthorized")
+                  _cache[token] = (claims, time.time() + CACHE_TTL)
+
+              principal_id = claims.get("sub", "unknown")
+              method_arn   = event.get("methodArn", "*")
+
+              return {
+                  "principalId": principal_id,
+                  "policyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                          {
+                              "Action": "execute-api:Invoke",
+                              "Effect": "Allow",
+                              "Resource": _wildcard_arn(method_arn),
+                          }
+                      ],
+                  },
+                  "context": {
+                      "userId": principal_id,
+                      "email": claims.get("email", ""),
+                      "groups": json.dumps(claims.get("cognito:groups", [])),
+                  },
+              }
+
+
+          def _extract_token(event):
+              token = event.get("authorizationToken", "")
+              if token.startswith("Bearer "):
+                  return token[7:]
+              return token or None
+
+
+          def _validate_token(token):
+              # Decode JWT header to get kid
+              try:
+                  parts = token.split(".")
+                  if len(parts) != 3:
+                      return None
+                  payload_bytes = parts[1] + "=="
+                  payload = json.loads(base64.b64decode(payload_bytes).decode())
+
+                  # Verify issuer matches our user pool
+                  expected_iss = f"https://cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}"
+                  if payload.get("iss") != expected_iss:
+                      return None
+
+                  # Verify token is not expired
+                  if payload.get("exp", 0) < time.time():
+                      return None
+
+                  return payload
+              except Exception:
+                  return None
+
+
+          def _wildcard_arn(method_arn):
+              # Convert specific method ARN to wildcard for the entire API stage
+              parts = method_arn.split(":")
+              if len(parts) < 6:
+                  return method_arn
+              arn_parts = parts[5].split("/")
+              if len(arn_parts) >= 2:
+                  return ":".join(parts[:5]) + ":" + arn_parts[0] + "/*/*"
+              return method_arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AuthorizerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+  AuthorizerFunctionArn:
+    Value: !GetAtt AuthorizerFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AuthorizerFunctionArn"
+
+  AuthorizerFunctionName:
+    Value: !Ref AuthorizerFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-AuthorizerFunctionName"

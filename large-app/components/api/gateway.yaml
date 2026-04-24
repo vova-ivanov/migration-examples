@@ -1,0 +1,102 @@
+Resources:
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-apigw-cloudwatch-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  AppRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "app-api-${Environment}"
+      Description: !Sub "App REST API for ${Environment}"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  TokenAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub "app-token-authorizer-${Environment}"
+      RestApiId: !Ref AppRestApi
+      Type: TOKEN
+      IdentitySource: method.request.header.Authorization
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthHandlerFunction.Arn}/invocations"
+      AuthorizerResultTtlInSeconds: 300
+
+  AuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AuthHandlerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AppRestApi}/authorizers/${TokenAuthorizer}"
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ItemsGetMethod
+      - ItemsPostMethod
+      - ItemsOptionsMethod
+      - ItemGetMethod
+      - ItemPutMethod
+      - ItemDeleteMethod
+      - ItemOptionsMethod
+      - UserGetMethod
+      - UserPutMethod
+      - AuthPostMethod
+      - AuthGetMethod
+      - UploadUrlPostMethod
+    Properties:
+      RestApiId: !Ref AppRestApi
+      Description: !Sub "Deployment for ${Environment}"
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
+    Properties:
+      RestApiId: !Ref AppRestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub "app-usage-plan-${Environment}"
+      Description: !Sub "Usage plan for ${Environment}"
+      ApiStages:
+        - ApiId: !Ref AppRestApi
+          Stage: !Ref ApiStage
+      Quota:
+        Limit: !If [IsProd, 1000000, 100000]
+        Period: MONTH
+      Throttle:
+        RateLimit: 1000
+        BurstLimit: 2000
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment

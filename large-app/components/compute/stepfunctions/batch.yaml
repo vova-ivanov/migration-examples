@@ -1,0 +1,53 @@
+Resources:
+  BatchStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: StatesPolicy
+    Properties:
+      StateMachineName: !Sub "app-batch-${Environment}"
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StatesRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Batch processing state machine",
+          "StartAt": "Validate",
+          "States": {
+            "Validate": {
+              "Type": "Pass",
+              "Result": {"validated": true},
+              "ResultPath": "$.validation",
+              "Next": "Process"
+            },
+            "Process": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${WorkerFunction.Arn}",
+                "Payload.$": "$"
+              },
+              "ResultPath": "$.processResult",
+              "Next": "Notify"
+            },
+            "Notify": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NotifierFunction.Arn}",
+                "Payload.$": "$"
+              },
+              "ResultPath": "$.notifyResult",
+              "Next": "Done"
+            },
+            "Done": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment

@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "Environment",      "ParameterValue": "staging" },
+  { "ParameterKey": "LambdaMemoryMB",   "ParameterValue": "512" },
+  { "ParameterKey": "EnableXRay",       "ParameterValue": "true" },
+  { "ParameterKey": "LogRetentionDays", "ParameterValue": "14" },
+  { "ParameterKey": "NotificationEmail","ParameterValue": "staging-alerts@example.com" }
+]

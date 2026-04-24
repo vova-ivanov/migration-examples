@@ -1,0 +1,74 @@
+Resources:
+  StatesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-states-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  StatesPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-states-policy-${Environment}"
+      Roles:
+        - !Ref StatesRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !GetAtt WorkerFunction.Arn
+              - !GetAtt NotifierFunction.Arn
+          - Effect: Allow
+            Action:
+              - logs:CreateLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutLogEvents
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:DescribeLogGroups
+            Resource: "*"
+
+  EventBridgeSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-eventbridge-scheduler-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  EventBridgeSchedulerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-eventbridge-scheduler-policy-${Environment}"
+      Roles:
+        - !Ref EventBridgeSchedulerRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !GetAtt SchedulerFunction.Arn
+              - !GetAtt CleanupFunction.Arn

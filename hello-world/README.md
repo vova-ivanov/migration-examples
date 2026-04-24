@@ -1,0 +1,3 @@
+# Lambdas and other resources not surfacing their code
+
+Stack discovery captures the infrastructure shape — the Lambda function, its IAM role, the API Gateway, routes, and permissions — but not the application code that runs inside it. The handler here is embedded inline in the template, so in this specific case the code travels with the CloudFormation resource. In real-world deployments the code is almost always deployed separately as a ZIP artifact, and the discovered state contains only an S3 reference or a function ARN with no access to the actual source. A migration that stops at import produces a working infrastructure skeleton, but the implementation of every Lambda must still be sourced from the application repository.

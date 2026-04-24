@@ -1,0 +1,248 @@
+Resources:
+  ApiHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-api-handler-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiHandlerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-api-handler-policy-${Environment}"
+      Roles:
+        - !Ref ApiHandlerRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt ItemsTable.Arn
+              - !Sub "${ItemsTable.Arn}/index/*"
+              - !GetAtt UsersTable.Arn
+              - !Sub "${UsersTable.Arn}/index/*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${AssetsBucket}/*"
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt JobsQueue.Arn
+
+  AuthHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-auth-handler-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuthHandlerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-auth-handler-policy-${Environment}"
+      Roles:
+        - !Ref AuthHandlerRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - cognito-idp:AdminInitiateAuth
+              - cognito-idp:AdminGetUser
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminDeleteUser
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+            Resource: !GetAtt SessionsTable.Arn
+
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-worker-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-worker-policy-${Environment}"
+      Roles:
+        - !Ref WorkerRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Resource: !GetAtt ItemsTable.Arn
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "arn:aws:s3:::${AssetsBucket}/*"
+          - Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+            Resource: !GetAtt JobsQueue.Arn
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref NotificationsTopic
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-scheduler-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SchedulerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-scheduler-policy-${Environment}"
+      Roles:
+        - !Ref SchedulerRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !Ref BatchStateMachine
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+            Resource: !GetAtt ItemsTable.Arn
+
+  NotifierRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-notifier-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  NotifierPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-notifier-policy-${Environment}"
+      Roles:
+        - !Ref NotifierRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ses:SendEmail
+              - ses:SendRawEmail
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref NotificationsTopic
+
+  CleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-cleanup-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  CleanupPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "app-cleanup-policy-${Environment}"
+      Roles:
+        - !Ref CleanupRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt SessionsTable.Arn
+              - !GetAtt OrdersTable.Arn
+          - Effect: Allow
+            Action:
+              - s3:DeleteObject
+            Resource: !Sub "arn:aws:s3:::${ArtifactsBucket}/*"

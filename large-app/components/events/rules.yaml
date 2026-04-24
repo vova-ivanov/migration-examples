@@ -1,0 +1,61 @@
+Resources:
+  ScheduledBatchRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "app-scheduled-batch-${Environment}"
+      Description: "Trigger batch processing at 2am daily"
+      ScheduleExpression: "cron(0 2 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: SchedulerFunctionTarget
+          Arn: !GetAtt SchedulerFunction.Arn
+
+  ScheduledBatchPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SchedulerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledBatchRule.Arn
+
+  DailyCleanupRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "app-daily-cleanup-${Environment}"
+      Description: "Trigger daily cleanup at 3am"
+      ScheduleExpression: "cron(0 3 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: CleanupFunctionTarget
+          Arn: !GetAtt CleanupFunction.Arn
+
+  DailyCleanupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CleanupFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyCleanupRule.Arn
+
+  ItemEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "app-item-event-${Environment}"
+      Description: "Route item creation events to notifier"
+      EventPattern:
+        source:
+          - "app.items"
+        detail-type:
+          - "ItemCreated"
+      State: ENABLED
+      Targets:
+        - Id: NotifierFunctionTarget
+          Arn: !GetAtt NotifierFunction.Arn
+
+  ItemEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt NotifierFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ItemEventRule.Arn

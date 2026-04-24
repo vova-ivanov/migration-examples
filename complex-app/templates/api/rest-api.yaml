@@ -1,0 +1,411 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: API Gateway REST API — routes, authorizer, CORS, usage plan, and deployment
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  EnableXRay:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  ApiHandlerArn:
+    Type: String
+    Description: ARN of the API handler Lambda
+
+  AuthHandlerArn:
+    Type: String
+    Description: ARN of the auth handler Lambda
+
+  AuthorizerFunctionArn:
+    Type: String
+    Description: ARN of the Lambda authorizer function
+
+  ThrottlingRateLimit:
+    Type: Number
+    Default: 1000
+    Description: API Gateway throttle rate limit (requests per second)
+
+  ThrottlingBurstLimit:
+    Type: Number
+    Default: 2000
+    Description: API Gateway throttle burst limit
+
+Conditions:
+  XRayEnabled: !Equals [!Ref EnableXRay, "true"]
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  # ── REST API ─────────────────────────────────────────────────────────────────
+
+  AppRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "app-api-${Environment}"
+      Description: !Sub "Application REST API — ${Environment}"
+      EndpointConfiguration:
+        Types: [REGIONAL]
+      BinaryMediaTypes:
+        - "multipart/form-data"
+        - "application/octet-stream"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Lambda Authorizer ────────────────────────────────────────────────────────
+
+  TokenAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub "app-token-authorizer-${Environment}"
+      RestApiId: !Ref AppRestApi
+      Type: TOKEN
+      IdentitySource: method.request.header.Authorization
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerFunctionArn}/invocations"
+      AuthorizerResultTtlInSeconds: 300
+
+  # ── /v1 Resource ─────────────────────────────────────────────────────────────
+
+  V1Resource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !GetAtt AppRestApi.RootResourceId
+      PathPart: v1
+
+  # ── /v1/items ────────────────────────────────────────────────────────────────
+
+  ItemsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref V1Resource
+      PathPart: items
+
+  ItemsGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      RequestParameters:
+        method.request.querystring.status: false
+        method.request.querystring.ownerId: false
+        method.request.querystring.limit: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  ItemsPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  ItemsOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Session-Id'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # ── /v1/items/{id} ───────────────────────────────────────────────────────────
+
+  ItemResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref ItemsResource
+      PathPart: "{id}"
+
+  ItemGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  ItemPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemResource
+      HttpMethod: PUT
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  ItemDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemResource
+      HttpMethod: DELETE
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  ItemOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref ItemResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # ── /v1/users ────────────────────────────────────────────────────────────────
+
+  UsersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref V1Resource
+      PathPart: users
+
+  UserResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref UsersResource
+      PathPart: "{userId}"
+
+  UserGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref UserResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  UserPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref UserResource
+      HttpMethod: PUT
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  # ── /v1/auth ─────────────────────────────────────────────────────────────────
+
+  AuthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref V1Resource
+      PathPart: auth
+
+  AuthActionResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref AuthResource
+      PathPart: "{action}"
+
+  AuthPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref AuthActionResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthHandlerArn}/invocations"
+
+  AuthGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref AuthActionResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthHandlerArn}/invocations"
+
+  # ── /v1/assets ───────────────────────────────────────────────────────────────
+
+  AssetsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref V1Resource
+      PathPart: assets
+
+  UploadUrlResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ParentId: !Ref AssetsResource
+      PathPart: upload-url
+
+  UploadUrlPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppRestApi
+      ResourceId: !Ref UploadUrlResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref TokenAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiHandlerArn}/invocations"
+
+  # ── Deployment ───────────────────────────────────────────────────────────────
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ItemsGet
+      - ItemsPost
+      - ItemsOptions
+      - ItemGet
+      - ItemPut
+      - ItemDelete
+      - ItemOptions
+      - UserGet
+      - UserPut
+      - AuthPost
+      - AuthGet
+      - UploadUrlPost
+    Properties:
+      RestApiId: !Ref AppRestApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref AppRestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      TracingEnabled: !If [XRayEnabled, true, false]
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: !Ref ThrottlingRateLimit
+          ThrottlingBurstLimit: !Ref ThrottlingBurstLimit
+          MetricsEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Usage Plan ───────────────────────────────────────────────────────────────
+
+  ApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub "app-usage-plan-${Environment}"
+      ApiStages:
+        - ApiId: !Ref AppRestApi
+          Stage: !Ref ApiStage
+      Throttle:
+        RateLimit: !Ref ThrottlingRateLimit
+        BurstLimit: !Ref ThrottlingBurstLimit
+      Quota:
+        Limit: !If [IsProd, 1000000, 100000]
+        Period: MONTH
+
+  # ── Lambda Permissions ────────────────────────────────────────────────────────
+
+  ApiHandlerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiHandlerArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AppRestApi}/*/*"
+
+  AuthHandlerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuthHandlerArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AppRestApi}/*/*"
+
+Outputs:
+  RestApiId:
+    Value: !Ref AppRestApi
+    Export:
+      Name: !Sub "${AWS::StackName}-RestApiId"
+
+  ApiEndpoint:
+    Value: !Sub "https://${AppRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/v1"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  ApiStageName:
+    Value: !Ref ApiStage
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiStageName"

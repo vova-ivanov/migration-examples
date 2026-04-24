@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Minimal serverless web application — API Gateway, Lambda, DynamoDB, S3
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  LambdaMemoryMB:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024]
+    Description: Lambda memory allocation in MB
+
+Resources:
+
+  # ── Storage ────────────────────────────────────────────────────────────────
+
+  # DynamoDB table — primary data store for the application
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "app-items-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 bucket — stores user-uploaded assets
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "app-assets-${Environment}-${AWS::AccountId}"
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Compute ────────────────────────────────────────────────────────────────
+
+  # IAM role — grants Lambda permission to access DynamoDB and S3
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "app-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AppAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ItemsTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${AssetsBucket.Arn}/*"
+
+  # Lambda function — handles all API requests
+  AppFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "app-handler-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ItemsTable
+          BUCKET_NAME: !Ref AssetsBucket
+          ENV: !Ref Environment
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          from datetime import datetime, timezone
+
+          dynamo = boto3.resource("dynamodb")
+          table  = dynamo.Table(os.environ["TABLE_NAME"])
+
+          def handler(event, context):
+              method = event.get("httpMethod", "GET")
+              path   = event.get("path", "/")
+              item_id = (event.get("pathParameters") or {}).get("id")
+
+              if method == "GET" and not item_id:
+                  result = table.scan()
+                  return _ok(result.get("Items", []))
+
+              if method == "GET" and item_id:
+                  result = table.get_item(Key={"id": item_id})
+                  item = result.get("Item")
+                  return _ok(item) if item else _err(404, "not found")
+
+              if method == "POST":
+                  body = json.loads(event.get("body") or "{}")
+                  body["id"] = context.aws_request_id
+                  body["createdAt"] = datetime.now(timezone.utc).isoformat()
+                  table.put_item(Item=body)
+                  return _ok(body, 201)
+
+              if method == "DELETE" and item_id:
+                  table.delete_item(Key={"id": item_id})
+                  return _ok({"deleted": item_id})
+
+              return _err(405, "method not allowed")
+
+          def _ok(body, status=200):
+              return {"statusCode": status,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps(body, default=str)}
+
+          def _err(status, msg):
+              return {"statusCode": status,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps({"error": msg})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── API ────────────────────────────────────────────────────────────────────
+
+  # REST API
+  AppApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "app-api-${Environment}"
+      Description: Application REST API
+      EndpointConfiguration:
+        Types: [REGIONAL]
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # /items resource
+  ItemsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppApi
+      ParentId: !GetAtt AppApi.RootResourceId
+      PathPart: items
+
+  # /items/{id} resource
+  ItemResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AppApi
+      ParentId: !Ref ItemsResource
+      PathPart: "{id}"
+
+  # ANY /items  → Lambda
+  ItemsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AppFunction.Arn}/invocations"
+
+  # ANY /items/{id} → Lambda
+  ItemMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AppApi
+      ResourceId: !Ref ItemResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AppFunction.Arn}/invocations"
+
+  # Deploy the API
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [ItemsMethod, ItemMethod]
+    Properties:
+      RestApiId: !Ref AppApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref AppApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+
+  # Permission — allows API Gateway to invoke the Lambda function
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AppFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AppApi}/*/*"
+
+Outputs:
+  ApiEndpoint:
+    Description: Base URL of the REST API
+    Value: !Sub "https://${AppApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+
+  ItemsEndpoint:
+    Description: Items collection endpoint
+    Value: !Sub "https://${AppApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/items"
+
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref AppFunction
+
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref ItemsTable
+
+  BucketName:
+    Description: S3 assets bucket name
+    Value: !Ref AssetsBucket

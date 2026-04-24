@@ -1,0 +1,24 @@
+Resources:
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "app-notifications-${Environment}"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  AlarmsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "app-alarms-${Environment}"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  AlarmsTopicEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+      TopicArn: !Ref AlarmsTopic

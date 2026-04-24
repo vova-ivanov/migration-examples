@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudWatch dashboard with Lambda, API Gateway, DynamoDB, and SQS metrics
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  ApiHandlerName:
+    Type: String
+
+  WorkerFunctionName:
+    Type: String
+
+  RestApiId:
+    Type: String
+
+  ItemsTableName:
+    Type: String
+
+  JobsQueueName:
+    Type: String
+
+Resources:
+
+  AppDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "app-overview-${Environment}"
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "text",
+                "x": 0, "y": 0, "width": 24, "height": 1,
+                "properties": {
+                  "markdown": "# App Platform — ${Env} | Region: ${Region}"
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0, "y": 1, "width": 8, "height": 6,
+                "properties": {
+                  "title": "API Handler — Invocations & Errors",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/Lambda", "Invocations",   "FunctionName", "${ApiHandler}", {"stat": "Sum",     "color": "#2196f3", "label": "Invocations"}],
+                    ["AWS/Lambda", "Errors",         "FunctionName", "${ApiHandler}", {"stat": "Sum",     "color": "#f44336", "label": "Errors"}],
+                    ["AWS/Lambda", "Throttles",      "FunctionName", "${ApiHandler}", {"stat": "Sum",     "color": "#ff9800", "label": "Throttles"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 8, "y": 1, "width": 8, "height": 6,
+                "properties": {
+                  "title": "API Handler — Duration (ms)",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/Lambda", "Duration", "FunctionName", "${ApiHandler}", {"stat": "p50",  "color": "#4caf50", "label": "p50"}],
+                    ["AWS/Lambda", "Duration", "FunctionName", "${ApiHandler}", {"stat": "p90",  "color": "#ff9800", "label": "p90"}],
+                    ["AWS/Lambda", "Duration", "FunctionName", "${ApiHandler}", {"stat": "p99",  "color": "#f44336", "label": "p99"}],
+                    ["AWS/Lambda", "Duration", "FunctionName", "${ApiHandler}", {"stat": "Maximum", "color": "#9c27b0", "label": "Max"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 16, "y": 1, "width": 8, "height": 6,
+                "properties": {
+                  "title": "API Gateway — Requests & Errors",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/ApiGateway", "Count",    "ApiName", "app-api-${Env}", "Stage", "${Env}", {"stat": "Sum",  "color": "#2196f3", "label": "Requests"}],
+                    ["AWS/ApiGateway", "4XXError",  "ApiName", "app-api-${Env}", "Stage", "${Env}", {"stat": "Sum",  "color": "#ff9800", "label": "4xx"}],
+                    ["AWS/ApiGateway", "5XXError",  "ApiName", "app-api-${Env}", "Stage", "${Env}", {"stat": "Sum",  "color": "#f44336", "label": "5xx"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0, "y": 7, "width": 8, "height": 6,
+                "properties": {
+                  "title": "API Gateway — Latency (ms)",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/ApiGateway", "Latency", "ApiName", "app-api-${Env}", "Stage", "${Env}", {"stat": "p50",  "label": "p50"}],
+                    ["AWS/ApiGateway", "Latency", "ApiName", "app-api-${Env}", "Stage", "${Env}", {"stat": "p99",  "label": "p99"}],
+                    ["AWS/ApiGateway", "Latency", "ApiName", "app-api-${Env}", "Stage", "${Env}", {"stat": "Maximum", "label": "Max"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 8, "y": 7, "width": 8, "height": 6,
+                "properties": {
+                  "title": "Worker — Invocations & Errors",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/Lambda", "Invocations", "FunctionName", "${Worker}", {"stat": "Sum",  "color": "#2196f3", "label": "Invocations"}],
+                    ["AWS/Lambda", "Errors",       "FunctionName", "${Worker}", {"stat": "Sum",  "color": "#f44336", "label": "Errors"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 16, "y": 7, "width": 8, "height": 6,
+                "properties": {
+                  "title": "SQS Jobs Queue",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/SQS", "ApproximateNumberOfMessagesVisible",    "QueueName", "${JobsQueue}", {"stat": "Maximum", "label": "Visible"}],
+                    ["AWS/SQS", "ApproximateNumberOfMessagesNotVisible", "QueueName", "${JobsQueue}", {"stat": "Maximum", "label": "In-Flight"}],
+                    ["AWS/SQS", "NumberOfMessagesSent",                  "QueueName", "${JobsQueue}", {"stat": "Sum",     "label": "Sent"}],
+                    ["AWS/SQS", "NumberOfMessagesDeleted",               "QueueName", "${JobsQueue}", {"stat": "Sum",     "label": "Deleted"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0, "y": 13, "width": 8, "height": 6,
+                "properties": {
+                  "title": "DynamoDB — Items Table Latency",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/DynamoDB", "SuccessfulRequestLatency", "TableName", "${ItemsTable}", "Operation", "GetItem",     {"stat": "p99", "label": "GetItem p99"}],
+                    ["AWS/DynamoDB", "SuccessfulRequestLatency", "TableName", "${ItemsTable}", "Operation", "PutItem",     {"stat": "p99", "label": "PutItem p99"}],
+                    ["AWS/DynamoDB", "SuccessfulRequestLatency", "TableName", "${ItemsTable}", "Operation", "Query",       {"stat": "p99", "label": "Query p99"}],
+                    ["AWS/DynamoDB", "SuccessfulRequestLatency", "TableName", "${ItemsTable}", "Operation", "UpdateItem",  {"stat": "p99", "label": "UpdateItem p99"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 8, "y": 13, "width": 8, "height": 6,
+                "properties": {
+                  "title": "DynamoDB — Throttles & Errors",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 300,
+                  "metrics": [
+                    ["AWS/DynamoDB", "ThrottledRequests", "TableName", "${ItemsTable}", {"stat": "Sum", "color": "#ff9800", "label": "Throttled"}],
+                    ["AWS/DynamoDB", "SystemErrors",       "TableName", "${ItemsTable}", {"stat": "Sum", "color": "#f44336", "label": "SystemErrors"}],
+                    ["AWS/DynamoDB", "UserErrors",         "TableName", "${ItemsTable}", {"stat": "Sum", "color": "#9c27b0", "label": "UserErrors"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 16, "y": 13, "width": 8, "height": 6,
+                "properties": {
+                  "title": "Lambda — Concurrent Executions",
+                  "region": "${Region}",
+                  "view": "timeSeries",
+                  "stacked": true,
+                  "period": 60,
+                  "metrics": [
+                    ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${ApiHandler}", {"stat": "Maximum", "label": "API Handler"}],
+                    ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${Worker}",     {"stat": "Maximum", "label": "Worker"}]
+                  ]
+                }
+              }
+            ]
+          }
+        - Env: !Ref Environment
+          Region: !Ref AWS::Region
+          ApiHandler: !Ref ApiHandlerName
+          Worker: !Ref WorkerFunctionName
+          ItemsTable: !Ref ItemsTableName
+          JobsQueue: !Ref JobsQueueName
+
+Outputs:
+  DashboardUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=app-overview-${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-DashboardUrl"
+
+  DashboardName:
+    Value: !Ref AppDashboard

@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: API handler Lambda — serves GET/POST/PUT/DELETE for items and users
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  MemoryMB:
+    Type: Number
+    Default: 256
+
+  EnableXRay:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+  ExecutionRoleArn:
+    Type: String
+
+  UtilsLayerArn:
+    Type: String
+
+  ItemsTableName:
+    Type: String
+
+  UsersTableName:
+    Type: String
+
+  AssetsBucketName:
+    Type: String
+
+  JobsQueueUrl:
+    Type: String
+
+Conditions:
+  XRayEnabled: !Equals [!Ref EnableXRay, "true"]
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  ApiHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-api-handler-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiHandlerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiHandlerLogGroup
+    Properties:
+      FunctionName: !Sub "app-api-handler-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !Ref ExecutionRoleArn
+      MemorySize: !Ref MemoryMB
+      Timeout: 30
+      Architectures:
+        - x86_64
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Layers:
+        - !Ref UtilsLayerArn
+      ReservedConcurrentExecutions: !If [IsProd, 50, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          ENV: !Ref Environment
+          ITEMS_TABLE: !Ref ItemsTableName
+          USERS_TABLE: !Ref UsersTableName
+          ASSETS_BUCKET: !Ref AssetsBucketName
+          JOBS_QUEUE_URL: !Ref JobsQueueUrl
+          LOG_LEVEL: !If [IsProd, WARNING, INFO]
+          POWERTOOLS_SERVICE_NAME: api-handler
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import uuid
+          import boto3
+          from datetime import datetime, timezone
+
+          dynamo   = boto3.resource("dynamodb")
+          s3       = boto3.client("s3")
+          sqs      = boto3.client("sqs")
+
+          items_table = dynamo.Table(os.environ["ITEMS_TABLE"])
+          users_table = dynamo.Table(os.environ["USERS_TABLE"])
+
+          def handler(event, context):
+              method   = event.get("httpMethod", "GET")
+              resource = event.get("resource", "/")
+              # Strip the /v1 prefix introduced by the API Gateway V1Resource
+              if resource.startswith("/v1"):
+                  resource = resource[3:] or "/"
+              path_params = event.get("pathParameters") or {}
+              query_params = event.get("queryStringParameters") or {}
+              body_raw = event.get("body") or "{}"
+
+              try:
+                  body = json.loads(body_raw)
+              except json.JSONDecodeError:
+                  return _err(400, "invalid JSON body")
+
+              # ── /items ──────────────────────────────────────────────────────
+              if resource == "/items":
+                  if method == "GET":
+                      return _list_items(query_params)
+                  if method == "POST":
+                      return _create_item(body, context)
+
+              # ── /items/{id} ─────────────────────────────────────────────────
+              if resource == "/items/{id}":
+                  item_id = path_params.get("id")
+                  if method == "GET":
+                      return _get_item(item_id)
+                  if method == "PUT":
+                      return _update_item(item_id, body)
+                  if method == "DELETE":
+                      return _delete_item(item_id)
+
+              # ── /users/{userId} ─────────────────────────────────────────────
+              if resource == "/users/{userId}":
+                  user_id = path_params.get("userId")
+                  if method == "GET":
+                      return _get_user(user_id)
+                  if method == "PUT":
+                      return _update_user(user_id, body)
+
+              # ── /assets/upload-url ──────────────────────────────────────────
+              if resource == "/assets/upload-url" and method == "POST":
+                  return _presign_upload(body)
+
+              return _err(404, "route not found")
+
+          # ── Item handlers ────────────────────────────────────────────────────
+
+          def _list_items(params):
+              status_filter = params.get("status")
+              owner_filter  = params.get("ownerId")
+              limit = int(params.get("limit", "50"))
+
+              if owner_filter:
+                  result = items_table.query(
+                      IndexName="OwnerIndex",
+                      KeyConditionExpression="ownerId = :oid",
+                      ExpressionAttributeValues={":oid": owner_filter},
+                      Limit=limit,
+                  )
+              elif status_filter:
+                  result = items_table.query(
+                      IndexName="StatusIndex",
+                      KeyConditionExpression="#s = :s",
+                      ExpressionAttributeNames={"#s": "status"},
+                      ExpressionAttributeValues={":s": status_filter},
+                      Limit=limit,
+                  )
+              else:
+                  result = items_table.scan(Limit=limit)
+
+              return _ok({"items": result.get("Items", []),
+                          "count": result.get("Count", 0),
+                          "lastKey": result.get("LastEvaluatedKey")})
+
+          def _get_item(item_id):
+              if not item_id:
+                  return _err(400, "missing item id")
+              result = items_table.get_item(Key={"id": item_id})
+              item = result.get("Item")
+              return _ok(item) if item else _err(404, "item not found")
+
+          def _create_item(body, context):
+              missing = [f for f in ["title", "ownerId"] if f not in body]
+              if missing:
+                  return _err(400, f"missing required fields: {missing}")
+              now = datetime.now(timezone.utc).isoformat()
+              item = {
+                  **body,
+                  "id": str(uuid.uuid4()),
+                  "status": body.get("status", "draft"),
+                  "createdAt": now,
+                  "updatedAt": now,
+              }
+              items_table.put_item(Item=item)
+              _enqueue_job("item.created", {"itemId": item["id"]})
+              return _ok(item, 201)
+
+          def _update_item(item_id, body):
+              if not item_id:
+                  return _err(400, "missing item id")
+              body.pop("id", None)
+              body["updatedAt"] = datetime.now(timezone.utc).isoformat()
+              expr_names  = {f"#k{i}": k for i, k in enumerate(body)}
+              expr_values = {f":v{i}": v for i, (k, v) in enumerate(body.items())}
+              set_expr = ", ".join(
+                  f"#k{i} = :v{i}" for i in range(len(body))
+              )
+              items_table.update_item(
+                  Key={"id": item_id},
+                  UpdateExpression=f"SET {set_expr}",
+                  ExpressionAttributeNames=expr_names,
+                  ExpressionAttributeValues=expr_values,
+              )
+              return _ok({"id": item_id, "updated": True})
+
+          def _delete_item(item_id):
+              if not item_id:
+                  return _err(400, "missing item id")
+              items_table.delete_item(Key={"id": item_id})
+              _enqueue_job("item.deleted", {"itemId": item_id})
+              return _ok({"deleted": item_id})
+
+          # ── User handlers ────────────────────────────────────────────────────
+
+          def _get_user(user_id):
+              if not user_id:
+                  return _err(400, "missing userId")
+              result = users_table.get_item(Key={"userId": user_id})
+              user = result.get("Item")
+              if user:
+                  user.pop("passwordHash", None)
+              return _ok(user) if user else _err(404, "user not found")
+
+          def _update_user(user_id, body):
+              if not user_id:
+                  return _err(400, "missing userId")
+              for field in ("userId", "passwordHash", "email"):
+                  body.pop(field, None)
+              body["updatedAt"] = datetime.now(timezone.utc).isoformat()
+              expr_names  = {f"#k{i}": k for i, k in enumerate(body)}
+              expr_values = {f":v{i}": v for i, (k, v) in enumerate(body.items())}
+              set_expr = ", ".join(f"#k{i} = :v{i}" for i in range(len(body)))
+              users_table.update_item(
+                  Key={"userId": user_id},
+                  UpdateExpression=f"SET {set_expr}",
+                  ExpressionAttributeNames=expr_names,
+                  ExpressionAttributeValues=expr_values,
+              )
+              return _ok({"userId": user_id, "updated": True})
+
+          # ── Asset helpers ────────────────────────────────────────────────────
+
+          def _presign_upload(body):
+              key = body.get("key")
+              content_type = body.get("contentType", "application/octet-stream")
+              if not key:
+                  return _err(400, "missing key")
+              url = s3.generate_presigned_url(
+                  "put_object",
+                  Params={
+                      "Bucket": os.environ["ASSETS_BUCKET"],
+                      "Key": key,
+                      "ContentType": content_type,
+                  },
+                  ExpiresIn=900,
+              )
+              return _ok({"uploadUrl": url, "key": key, "expiresIn": 900})
+
+          # ── Queue helper ─────────────────────────────────────────────────────
+
+          def _enqueue_job(event_type, payload):
+              sqs.send_message(
+                  QueueUrl=os.environ["JOBS_QUEUE_URL"],
+                  MessageBody=json.dumps({
+                      "eventType": event_type,
+                      "payload": payload,
+                  }),
+              )
+
+          # ── Response helpers ─────────────────────────────────────────────────
+
+          def _ok(body, status=200):
+              return {"statusCode": status,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps(body, default=str)}
+
+          def _err(status, msg):
+              return {"statusCode": status,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps({"error": msg})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Auto-scaling for prod
+  ApiHandlerScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: IsProd
+    Properties:
+      MaxCapacity: 100
+      MinCapacity: 5
+      ResourceId: !Sub "function:${ApiHandlerFunction}:LIVE"
+      ScalableDimension: lambda:function:ProvisionedConcurrency
+      ServiceNamespace: lambda
+
+  ApiHandlerScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: IsProd
+    DependsOn: ApiHandlerScalingTarget
+    Properties:
+      PolicyName: !Sub "app-api-handler-scaling-${Environment}"
+      PolicyType: TargetTrackingScaling
+      ResourceId: !Sub "function:${ApiHandlerFunction}:LIVE"
+      ScalableDimension: lambda:function:ProvisionedConcurrency
+      ServiceNamespace: lambda
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 0.7
+        PredefinedMetricSpecification:
+          PredefinedMetricType: LambdaProvisionedConcurrencyUtilization
+
+Outputs:
+  ApiHandlerArn:
+    Value: !GetAtt ApiHandlerFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiHandlerArn"
+
+  ApiHandlerName:
+    Value: !Ref ApiHandlerFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiHandlerName"

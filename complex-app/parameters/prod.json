@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "Environment",      "ParameterValue": "prod" },
+  { "ParameterKey": "LambdaMemoryMB",   "ParameterValue": "1024" },
+  { "ParameterKey": "EnableXRay",       "ParameterValue": "true" },
+  { "ParameterKey": "LogRetentionDays", "ParameterValue": "90" },
+  { "ParameterKey": "NotificationEmail","ParameterValue": "prod-alerts@example.com" }
+]

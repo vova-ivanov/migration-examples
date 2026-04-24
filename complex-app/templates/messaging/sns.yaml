@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SNS topics — notifications and alarms, with optional email subscriptions
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  JobsQueueArn:
+    Type: String
+    Description: ARN of the SQS jobs queue to subscribe to the notifications topic
+
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address to subscribe to notifications
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+
+Resources:
+
+  # ── Notifications Topic ──────────────────────────────────────────────────────
+
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "app-notifications-${Environment}"
+      DisplayName: !Sub "App Notifications (${Environment})"
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: TopicPurpose
+          Value: notifications
+
+  NotificationsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref NotificationsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountPublish
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: sns:Publish
+            Resource: !Ref NotificationsTopic
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: "*"
+            Action: sns:Publish
+            Resource: !Ref NotificationsTopic
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref NotificationsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  SqsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationsTopic
+      Protocol: sqs
+      Endpoint: !Ref JobsQueueArn
+      FilterPolicy:
+        eventType:
+          - job_completed
+          - job_failed
+
+  # ── Alarms Topic ─────────────────────────────────────────────────────────────
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "app-alarms-${Environment}"
+      DisplayName: !Sub "App Alarms (${Environment})"
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: TopicPurpose
+          Value: alarms
+
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlarmTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlarmTopic
+          - Sid: AllowAccountPublish
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: sns:Publish
+            Resource: !Ref AlarmTopic
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+Outputs:
+  NotificationsTopicArn:
+    Value: !Ref NotificationsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-NotificationsTopicArn"
+
+  NotificationsTopicName:
+    Value: !GetAtt NotificationsTopic.TopicName
+    Export:
+      Name: !Sub "${AWS::StackName}-NotificationsTopicName"
+
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlarmTopicArn"

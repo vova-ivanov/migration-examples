@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudWatch alarms — Lambda errors, API latency, DynamoDB throttles, SQS DLQ depth
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  ApiHandlerName:
+    Type: String
+    Description: API handler Lambda function name
+
+  WorkerFunctionName:
+    Type: String
+    Description: Worker Lambda function name
+
+  RestApiId:
+    Type: String
+    Description: API Gateway REST API ID
+
+  ItemsTableName:
+    Type: String
+    Description: DynamoDB items table name
+
+  JobsDlqArn:
+    Type: String
+    Description: ARN of the jobs dead-letter queue
+
+  AlarmTopicArn:
+    Type: String
+    Description: SNS topic ARN for alarm notifications
+
+  ErrorRateThreshold:
+    Type: Number
+    Default: 5
+    Description: Lambda error count threshold per 5 minutes before alarm triggers
+
+  P99LatencyThresholdMs:
+    Type: Number
+    Default: 3000
+    Description: API Gateway P99 latency threshold in milliseconds
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  # ── Lambda Alarms — API Handler ──────────────────────────────────────────────
+
+  ApiHandlerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-api-handler-errors-${Environment}"
+      AlarmDescription: !Sub "API handler Lambda errors exceed ${ErrorRateThreshold} in 5 minutes"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiHandlerName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref ErrorRateThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  ApiHandlerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-api-handler-throttles-${Environment}"
+      AlarmDescription: API handler Lambda is being throttled
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiHandlerName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+  ApiHandlerDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-api-handler-duration-${Environment}"
+      AlarmDescription: API handler P99 duration is approaching timeout
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiHandlerName
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 25000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+  # ── Lambda Alarms — Worker ───────────────────────────────────────────────────
+
+  WorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-worker-errors-${Environment}"
+      AlarmDescription: Worker Lambda errors in 5 minutes
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WorkerFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref ErrorRateThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  WorkerConcurrencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub "app-worker-concurrency-${Environment}"
+      AlarmDescription: Worker concurrency is high — queue may be backing up
+      Namespace: AWS/Lambda
+      MetricName: ConcurrentExecutions
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WorkerFunctionName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+  # ── API Gateway Alarms ───────────────────────────────────────────────────────
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-api-5xx-errors-${Environment}"
+      AlarmDescription: API Gateway 5xx error rate is elevated
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub "app-api-${Environment}"
+        - Name: Stage
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  ApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-api-latency-p99-${Environment}"
+      AlarmDescription: !Sub "API Gateway P99 latency exceeds ${P99LatencyThresholdMs}ms"
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub "app-api-${Environment}"
+        - Name: Stage
+          Value: !Ref Environment
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref P99LatencyThresholdMs
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+  # ── DynamoDB Alarms ──────────────────────────────────────────────────────────
+
+  DynamoThrottledRequestsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-dynamo-throttles-${Environment}"
+      AlarmDescription: DynamoDB is throttling requests on the items table
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value: !Ref ItemsTableName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+  DynamoSystemErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-dynamo-system-errors-${Environment}"
+      AlarmDescription: DynamoDB system errors detected on the items table
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions:
+        - Name: TableName
+          Value: !Ref ItemsTableName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+  # ── SQS DLQ Alarm ────────────────────────────────────────────────────────────
+
+  JobsDlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "app-jobs-dlq-depth-${Environment}"
+      AlarmDescription: Messages are accumulating in the jobs dead-letter queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Select [5, !Split [":", !Ref JobsDlqArn]]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopicArn
+      OKActions:
+        - !Ref AlarmTopicArn
+
+  # ── Composite Alarm ──────────────────────────────────────────────────────────
+
+  CriticalCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Condition: IsProd
+    Properties:
+      AlarmName: !Sub "app-critical-composite-${Environment}"
+      AlarmDescription: Any critical alarm is firing
+      AlarmRule: !Sub
+        - "ALARM(${ApiErrors}) OR ALARM(${WorkerErrors}) OR ALARM(${Api5xx}) OR ALARM(${DlqDepth})"
+        - ApiErrors: !Ref ApiHandlerErrorsAlarm
+          WorkerErrors: !Ref WorkerErrorsAlarm
+          Api5xx: !Ref Api5xxAlarm
+          DlqDepth: !Ref JobsDlqDepthAlarm
+      AlarmActions:
+        - !Ref AlarmTopicArn
+
+Outputs:
+  ApiHandlerErrorsAlarmArn:
+    Value: !GetAtt ApiHandlerErrorsAlarm.Arn
+
+  WorkerErrorsAlarmArn:
+    Value: !GetAtt WorkerErrorsAlarm.Arn
+
+  JobsDlqDepthAlarmArn:
+    Value: !GetAtt JobsDlqDepthAlarm.Arn

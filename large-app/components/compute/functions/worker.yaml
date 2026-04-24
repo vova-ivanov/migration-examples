@@ -1,0 +1,48 @@
+Resources:
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-worker-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WorkerLogGroup
+    Properties:
+      FunctionName: !Sub "app-worker-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt WorkerRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: 300
+      Layers:
+        - !Ref UtilsLayer
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              records = event.get('Records', [])
+              processed = [json.loads(r['body']) for r in records]
+              return {'statusCode': 200, 'processed': len(processed)}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt JobsQueue.Arn
+      FunctionName: !GetAtt WorkerFunction.Arn
+      BatchSize: 10
+      Enabled: true

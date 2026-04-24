@@ -1,0 +1,38 @@
+Resources:
+  SchedulerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-scheduler-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SchedulerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SchedulerLogGroup
+    Properties:
+      FunctionName: !Sub "app-scheduler-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SchedulerRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: 60
+      Layers:
+        - !Ref UtilsLayer
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {'statusCode': 200, 'body': json.dumps({'scheduled': True, 'event': str(event)})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment

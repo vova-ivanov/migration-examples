@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: S3 buckets, count controlled by BucketCount parameter (1–5)
+
+Parameters:
+  BucketCount:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 5
+
+Conditions:
+  AtLeast2: !Not [!Equals [!Ref BucketCount, "1"]]
+  AtLeast3: !Not [!Or [!Equals [!Ref BucketCount, "1"], !Equals [!Ref BucketCount, "2"]]]
+  AtLeast4: !And
+    - !Not [!Equals [!Ref BucketCount, "1"]]
+    - !Not [!Equals [!Ref BucketCount, "2"]]
+    - !Not [!Equals [!Ref BucketCount, "3"]]
+  AtLeast5: !Equals [!Ref BucketCount, "5"]
+
+Resources:
+  Bucket1:
+    Type: AWS::S3::Bucket
+  Bucket2:
+    Type: AWS::S3::Bucket
+    Condition: AtLeast2
+  Bucket3:
+    Type: AWS::S3::Bucket
+    Condition: AtLeast3
+  Bucket4:
+    Type: AWS::S3::Bucket
+    Condition: AtLeast4
+  Bucket5:
+    Type: AWS::S3::Bucket
+    Condition: AtLeast5
+
+Outputs:
+  Bucket1Name:
+    Value: !Ref Bucket1
+  Bucket2Name:
+    Condition: AtLeast2
+    Value: !Ref Bucket2
+  Bucket3Name:
+    Condition: AtLeast3
+    Value: !Ref Bucket3
+  Bucket4Name:
+    Condition: AtLeast4
+    Value: !Ref Bucket4
+  Bucket5Name:
+    Condition: AtLeast5
+    Value: !Ref Bucket5

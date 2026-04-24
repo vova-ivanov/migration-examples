@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Dynamic Resource Allocation - only one Lambda resource exists at a time, toggled every 5 minutes via CloudFormation stack updates
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  ActiveResource:
+    Type: String
+    Default: A
+    AllowedValues: [A, B]
+    Description: Which resource is currently allocated (the other is fully deleted)
+
+Conditions:
+  IsResourceA: !Equals [!Ref ActiveResource, "A"]
+  IsResourceB: !Equals [!Ref ActiveResource, "B"]
+
+Resources:
+
+  # ── IAM ──────────────────────────────────────────────────────────────────────
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "dynamic-resources-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamicResourcesAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:PutParameter]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dynamic-resources/${Environment}/*"
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:dynamic-resources-${Environment}-resource-*"
+              # Permissions used by CloudFormation (running as this role) when creating/deleting resource functions
+              - Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:dynamic-resources-${Environment}-resource-*"
+              # PassRole + GetRole let CloudFormation assign and resolve LambdaRole when creating the new resource function
+              - Effect: Allow
+                Action: [iam:PassRole, iam:GetRole]
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/dynamic-resources-role-${Environment}"
+              - Effect: Allow
+                Action:
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+
+  # Separate role so EventBridge Scheduler doesn't need Lambda trust
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "dynamic-resources-scheduler-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeToggler
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt TogglerFunction.Arn
+
+  # ── State ─────────────────────────────────────────────────────────────────────
+
+  ActiveResourceParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/dynamic-resources/${Environment}/active"
+      Type: String
+      Value: !Ref ActiveResource
+      Description: Currently allocated resource (A or B)
+
+  # ── Resource A ────────────────────────────────────────────────────────────────
+  # Only created when ActiveResource=A; fully absent (deleted) otherwise.
+
+  ResourceAFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsResourceA
+    Properties:
+      FunctionName: !Sub "dynamic-resources-${Environment}-resource-a"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": "application/json"},
+                  "body": json.dumps({
+                      "resource": "A",
+                      "message": "Resource A is handling this request"
+                  }, indent=2)
+              }
+
+  # ── Resource B ────────────────────────────────────────────────────────────────
+  # Only created when ActiveResource=B; fully absent (deleted) otherwise.
+
+  ResourceBFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsResourceB
+    Properties:
+      FunctionName: !Sub "dynamic-resources-${Environment}-resource-b"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": "application/json"},
+                  "body": json.dumps({
+                      "resource": "B",
+                      "message": "Resource B is handling this request"
+                  }, indent=2)
+              }
+
+  # ── Router ────────────────────────────────────────────────────────────────────
+  # Reads SSM to find the active resource and proxies the request to it.
+  # GET /status returns allocation state without forwarding.
+
+  RouterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "dynamic-resources-${Environment}-router"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          SSM_PARAM: !Sub "/dynamic-resources/${Environment}/active"
+          RESOURCE_A_NAME: !Sub "dynamic-resources-${Environment}-resource-a"
+          RESOURCE_B_NAME: !Sub "dynamic-resources-${Environment}-resource-b"
+      Code:
+        ZipFile: |
+          import json, boto3, os
+          ssm = boto3.client("ssm")
+          lam = boto3.client("lambda")
+
+          def handler(event, context):
+              active = ssm.get_parameter(Name=os.environ["SSM_PARAM"])["Parameter"]["Value"]
+
+              if event.get("rawPath") == "/status":
+                  inactive = "B" if active == "A" else "A"
+                  return {
+                      "statusCode": 200,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps({
+                          "allocated": f"resource-{active.lower()}",
+                          "deallocated": f"resource-{inactive.lower()} (does not exist)",
+                          "toggle_interval": "5 minutes"
+                      }, indent=2)
+                  }
+
+              target = os.environ[f"RESOURCE_{active}_NAME"]
+              resp = lam.invoke(
+                  FunctionName=target,
+                  InvocationType="RequestResponse",
+                  Payload=json.dumps(event).encode()
+              )
+              return json.loads(resp["Payload"].read())
+
+  # ── Toggler ───────────────────────────────────────────────────────────────────
+  # Updates the CloudFormation stack's ActiveResource parameter to the opposite
+  # value. CloudFormation then creates the new resource and deletes the old one.
+  # SSM is updated after the stack update completes so the router is never
+  # directed at a function that doesn't exist yet.
+
+  TogglerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "dynamic-resources-${Environment}-toggler"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 600
+      Environment:
+        Variables:
+          SSM_PARAM: !Sub "/dynamic-resources/${Environment}/active"
+          STACK_NAME: !Sub "${AWS::StackName}"
+      Code:
+        ZipFile: |
+          import boto3, os
+          ssm = boto3.client("ssm")
+          cfn = boto3.client("cloudformation")
+
+          def handler(event, context):
+              param_name = os.environ["SSM_PARAM"]
+              stack_name = os.environ["STACK_NAME"]
+
+              current = ssm.get_parameter(Name=param_name)["Parameter"]["Value"]
+              next_active = "B" if current == "A" else "A"
+
+              cfn.update_stack(
+                  StackName=stack_name,
+                  UsePreviousTemplate=True,
+                  Parameters=[
+                      {"ParameterKey": "Environment",     "UsePreviousValue": True},
+                      {"ParameterKey": "ActiveResource",  "ParameterValue": next_active},
+                  ],
+                  Capabilities=["CAPABILITY_NAMED_IAM"],
+              )
+
+              waiter = cfn.get_waiter("stack_update_complete")
+              waiter.wait(StackName=stack_name, WaiterConfig={"Delay": 10, "MaxAttempts": 60})
+
+              ssm.put_parameter(Name=param_name, Value=next_active, Overwrite=True)
+
+              print(f"Toggled: {current} -> {next_active}")
+              return {"previous": current, "active": next_active}
+
+  # ── Scheduler ─────────────────────────────────────────────────────────────────
+
+  TogglerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "dynamic-resources-${Environment}-toggle"
+      ScheduleExpression: "rate(5 minutes)"
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt TogglerFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+  # ── API Gateway ───────────────────────────────────────────────────────────────
+  # Lambda Function URLs with AuthType=NONE are blocked by account-level
+  # Lambda Block Public Access. API Gateway uses IAM-authenticated Lambda
+  # invocations internally, bypassing this restriction.
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "dynamic-resources-api-${Environment}"
+      ProtocolType: HTTP
+
+  RouterIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RouterFunction.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  RootRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: "GET /"
+      Target: !Sub "integrations/${RouterIntegration}"
+
+  StatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: "GET /status"
+      Target: !Sub "integrations/${RouterIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref Api
+      StageName: "$default"
+      AutoDeploy: true
+
+  RouterApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RouterFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*"
+
+Outputs:
+  ApiEndpoint:
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/"
+    Description: Forwards to the currently allocated resource
+  StatusEndpoint:
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/status"
+    Description: Shows which resource is allocated and which is deleted
+  ActiveResourceParam:
+    Value: !Sub "/dynamic-resources/${Environment}/active"
+    Description: SSM parameter tracking the active resource (A or B)

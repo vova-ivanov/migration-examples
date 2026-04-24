@@ -1,0 +1,11 @@
+Resources:
+  UtilsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub "app-utils-layer-${Environment}"
+      Description: "Utility layer with shared helpers for all Lambda functions"
+      CompatibleRuntimes:
+        - python3.12
+      Content:
+        S3Bucket: !Sub "cfn-deploy-${AWS::AccountId}-${AWS::Region}"
+        S3Key: "large-app/layers/utils.zip"

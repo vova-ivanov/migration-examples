@@ -1,0 +1,3 @@
+# Resources that are dynamically allocated and deallocated between scans
+
+This stack intentionally keeps only one of two Lambda functions alive at any given time, toggling between them every five minutes via a scheduled CloudFormation stack update. A discovery scan taken at an arbitrary moment will observe either `ResourceAFunction` or `ResourceBFunction` — never both — giving the false impression that the other simply does not exist. A migration built solely from a snapshot would silently drop the deallocated resource and lose the toggling logic entirely. Correctly transferring this setup requires reading the source to understand that both functions are valid states of the same logical resource and that the switching mechanism itself must be preserved.

@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Complex serverless platform — nested stacks for network, storage, auth,
+  compute (Lambda + Step Functions), API Gateway, messaging, and monitoring.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment tier
+
+  LambdaMemoryMB:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024]
+    Description: Default Lambda memory allocation in MB
+
+  EnableXRay:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enable AWS X-Ray tracing on Lambda and API Gateway
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 7, 14, 30, 60, 90]
+    Description: CloudWatch log retention period in days
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for CloudWatch alarm notifications
+    Default: ""
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsNotDev: !Not [!Equals [!Ref Environment, dev]]
+  XRayEnabled: !Equals [!Ref EnableXRay, "true"]
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Environment
+        Parameters: [Environment, LogRetentionDays]
+      - Label:
+          default: Compute
+        Parameters: [LambdaMemoryMB, EnableXRay]
+      - Label:
+          default: Notifications
+        Parameters: [NotificationEmail]
+
+Resources:
+
+  # ── Networking ──────────────────────────────────────────────────────────────
+
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/network/vpc.yaml
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: network
+
+  # ── Storage ─────────────────────────────────────────────────────────────────
+
+  DynamoStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/storage/dynamodb.yaml
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: storage
+
+  S3Stack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/storage/s3.yaml
+      Parameters:
+        Environment: !Ref Environment
+        LogRetentionDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: storage
+
+  # ── Auth ────────────────────────────────────────────────────────────────────
+
+  AuthStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/auth/cognito.yaml
+      Parameters:
+        Environment: !Ref Environment
+        UserPoolEmailFrom: !Ref NotificationEmail
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: auth
+
+  # ── Messaging ───────────────────────────────────────────────────────────────
+
+  SqsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/messaging/sqs.yaml
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: messaging
+
+  SnsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: SqsStack
+    Properties:
+      TemplateURL: templates/messaging/sns.yaml
+      Parameters:
+        Environment: !Ref Environment
+        JobsQueueArn: !GetAtt SqsStack.Outputs.JobsQueueArn
+        NotificationEmail: !Ref NotificationEmail
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: messaging
+
+  # ── Compute — IAM ───────────────────────────────────────────────────────────
+
+  IamStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [DynamoStack, S3Stack, SqsStack, SnsStack]
+    Properties:
+      TemplateURL: templates/compute/iam.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ItemsTableArn: !GetAtt DynamoStack.Outputs.ItemsTableArn
+        UsersTableArn: !GetAtt DynamoStack.Outputs.UsersTableArn
+        SessionsTableArn: !GetAtt DynamoStack.Outputs.SessionsTableArn
+        AssetsBucketArn: !GetAtt S3Stack.Outputs.AssetsBucketArn
+        LogsBucketArn: !GetAtt S3Stack.Outputs.LogsBucketArn
+        JobsQueueArn: !GetAtt SqsStack.Outputs.JobsQueueArn
+        NotificationsTopicArn: !GetAtt SnsStack.Outputs.NotificationsTopicArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: compute
+
+  # ── Compute — Lambda Layers ─────────────────────────────────────────────────
+
+  LayersStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/compute/layers.yaml
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: compute
+
+  # ── Compute — Lambda Functions ──────────────────────────────────────────────
+
+  ApiHandlerStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [IamStack, LayersStack]
+    Properties:
+      TemplateURL: templates/compute/functions/api-handler.yaml
+      Parameters:
+        Environment: !Ref Environment
+        MemoryMB: !Ref LambdaMemoryMB
+        EnableXRay: !Ref EnableXRay
+        LogRetentionDays: !Ref LogRetentionDays
+        ExecutionRoleArn: !GetAtt IamStack.Outputs.ApiLambdaRoleArn
+        UtilsLayerArn: !GetAtt LayersStack.Outputs.UtilsLayerArn
+        ItemsTableName: !GetAtt DynamoStack.Outputs.ItemsTableName
+        UsersTableName: !GetAtt DynamoStack.Outputs.UsersTableName
+        AssetsBucketName: !GetAtt S3Stack.Outputs.AssetsBucketName
+        JobsQueueUrl: !GetAtt SqsStack.Outputs.JobsQueueUrl
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: compute
+
+  AuthHandlerStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [IamStack, AuthStack]
+    Properties:
+      TemplateURL: templates/compute/functions/auth-handler.yaml
+      Parameters:
+        Environment: !Ref Environment
+        MemoryMB: 128
+        EnableXRay: !Ref EnableXRay
+        LogRetentionDays: !Ref LogRetentionDays
+        ExecutionRoleArn: !GetAtt IamStack.Outputs.AuthLambdaRoleArn
+        UserPoolId: !GetAtt AuthStack.Outputs.UserPoolId
+        UserPoolClientId: !GetAtt AuthStack.Outputs.UserPoolClientId
+        SessionsTableName: !GetAtt DynamoStack.Outputs.SessionsTableName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: compute
+
+  WorkerStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [IamStack, LayersStack]
+    Properties:
+      TemplateURL: templates/compute/functions/worker.yaml
+      Parameters:
+        Environment: !Ref Environment
+        MemoryMB: 512
+        EnableXRay: !Ref EnableXRay
+        LogRetentionDays: !Ref LogRetentionDays
+        ExecutionRoleArn: !GetAtt IamStack.Outputs.WorkerLambdaRoleArn
+        UtilsLayerArn: !GetAtt LayersStack.Outputs.UtilsLayerArn
+        ItemsTableName: !GetAtt DynamoStack.Outputs.ItemsTableName
+        AssetsBucketName: !GetAtt S3Stack.Outputs.AssetsBucketName
+        JobsQueueUrl: !GetAtt SqsStack.Outputs.JobsQueueUrl
+        JobsQueueArn: !GetAtt SqsStack.Outputs.JobsQueueArn
+        NotificationsTopicArn: !GetAtt SnsStack.Outputs.NotificationsTopicArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: compute
+
+  # ── Compute — Step Functions ────────────────────────────────────────────────
+
+  StepFunctionsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [WorkerStack, IamStack]
+    Properties:
+      TemplateURL: templates/compute/stepfunctions.yaml
+      Parameters:
+        Environment: !Ref Environment
+        WorkerFunctionArn: !GetAtt WorkerStack.Outputs.WorkerFunctionArn
+        StatesRoleArn: !GetAtt IamStack.Outputs.StatesRoleArn
+        NotificationsTopicArn: !GetAtt SnsStack.Outputs.NotificationsTopicArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: compute
+
+  # ── API — Authorizer ────────────────────────────────────────────────────────
+
+  AuthorizerStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [AuthHandlerStack]
+    Properties:
+      TemplateURL: templates/api/authorizer.yaml
+      Parameters:
+        Environment: !Ref Environment
+        AuthHandlerArn: !GetAtt AuthHandlerStack.Outputs.AuthHandlerArn
+        UserPoolId: !GetAtt AuthStack.Outputs.UserPoolId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: api
+
+  # ── API — REST API ──────────────────────────────────────────────────────────
+
+  RestApiStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [ApiHandlerStack, AuthorizerStack]
+    Properties:
+      TemplateURL: templates/api/rest-api.yaml
+      Parameters:
+        Environment: !Ref Environment
+        EnableXRay: !Ref EnableXRay
+        ApiHandlerArn: !GetAtt ApiHandlerStack.Outputs.ApiHandlerArn
+        AuthHandlerArn: !GetAtt AuthHandlerStack.Outputs.AuthHandlerArn
+        AuthorizerFunctionArn: !GetAtt AuthorizerStack.Outputs.AuthorizerFunctionArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: api
+
+  # ── Monitoring ───────────────────────────────────────────────────────────────
+
+  AlarmsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [ApiHandlerStack, WorkerStack, RestApiStack, DynamoStack]
+    Properties:
+      TemplateURL: templates/monitoring/alarms.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ApiHandlerName: !GetAtt ApiHandlerStack.Outputs.ApiHandlerName
+        WorkerFunctionName: !GetAtt WorkerStack.Outputs.WorkerFunctionName
+        RestApiId: !GetAtt RestApiStack.Outputs.RestApiId
+        ItemsTableName: !GetAtt DynamoStack.Outputs.ItemsTableName
+        JobsDlqArn: !GetAtt SqsStack.Outputs.JobsDlqArn
+        AlarmTopicArn: !GetAtt SnsStack.Outputs.AlarmTopicArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: monitoring
+
+  DashboardStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: AlarmsStack
+    Properties:
+      TemplateURL: templates/monitoring/dashboard.yaml
+      Parameters:
+        Environment: !Ref Environment
+        ApiHandlerName: !GetAtt ApiHandlerStack.Outputs.ApiHandlerName
+        WorkerFunctionName: !GetAtt WorkerStack.Outputs.WorkerFunctionName
+        RestApiId: !GetAtt RestApiStack.Outputs.RestApiId
+        ItemsTableName: !GetAtt DynamoStack.Outputs.ItemsTableName
+        JobsQueueName: !GetAtt SqsStack.Outputs.JobsQueueName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: StackLayer
+          Value: monitoring
+
+Outputs:
+  ApiEndpoint:
+    Description: Base URL of the REST API
+    Value: !GetAtt RestApiStack.Outputs.ApiEndpoint
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !GetAtt AuthStack.Outputs.UserPoolId
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !GetAtt AuthStack.Outputs.UserPoolClientId
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+
+  ItemsTableName:
+    Description: DynamoDB items table name
+    Value: !GetAtt DynamoStack.Outputs.ItemsTableName
+    Export:
+      Name: !Sub "${AWS::StackName}-ItemsTableName"
+
+  AssetsBucketName:
+    Description: S3 assets bucket name
+    Value: !GetAtt S3Stack.Outputs.AssetsBucketName
+    Export:
+      Name: !Sub "${AWS::StackName}-AssetsBucketName"
+
+  DashboardUrl:
+    Description: CloudWatch dashboard URL
+    Value: !GetAtt DashboardStack.Outputs.DashboardUrl
+
+  VpcId:
+    Description: Application VPC ID
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"

@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Auth handler Lambda — token validation, session management, and JWT introspection
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  MemoryMB:
+    Type: Number
+    Default: 128
+
+  EnableXRay:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+  ExecutionRoleArn:
+    Type: String
+
+  UserPoolId:
+    Type: String
+
+  UserPoolClientId:
+    Type: String
+
+  SessionsTableName:
+    Type: String
+
+Conditions:
+  XRayEnabled: !Equals [!Ref EnableXRay, "true"]
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  AuthHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-auth-handler-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  AuthHandlerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AuthHandlerLogGroup
+    Properties:
+      FunctionName: !Sub "app-auth-handler-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !Ref ExecutionRoleArn
+      MemorySize: !Ref MemoryMB
+      Timeout: 10
+      Architectures:
+        - x86_64
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Environment:
+        Variables:
+          ENV: !Ref Environment
+          USER_POOL_ID: !Ref UserPoolId
+          USER_POOL_CLIENT_ID: !Ref UserPoolClientId
+          SESSIONS_TABLE: !Ref SessionsTableName
+          LOG_LEVEL: !If [IsProd, WARNING, INFO]
+          TOKEN_EXPIRY_HOURS: "24"
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import uuid
+          import hmac
+          import hashlib
+          import base64
+          import boto3
+          from datetime import datetime, timezone, timedelta
+
+          cognito  = boto3.client("cognito-idp")
+          dynamo   = boto3.resource("dynamodb")
+          sessions = dynamo.Table(os.environ["SESSIONS_TABLE"])
+
+          USER_POOL_ID     = os.environ["USER_POOL_ID"]
+          USER_POOL_CLIENT = os.environ["USER_POOL_CLIENT_ID"]
+          EXPIRY_HOURS     = int(os.environ.get("TOKEN_EXPIRY_HOURS", "24"))
+
+
+          def handler(event, context):
+              action = (event.get("pathParameters") or {}).get("action", "")
+              method = event.get("httpMethod", "POST")
+              body_raw = event.get("body") or "{}"
+
+              try:
+                  body = json.loads(body_raw)
+              except json.JSONDecodeError:
+                  return _err(400, "invalid JSON body")
+
+              if action == "login" and method == "POST":
+                  return _login(body)
+
+              if action == "logout" and method == "POST":
+                  return _logout(event)
+
+              if action == "refresh" and method == "POST":
+                  return _refresh(body)
+
+              if action == "verify" and method == "GET":
+                  return _verify(event)
+
+              if action == "me" and method == "GET":
+                  return _me(event)
+
+              return _err(404, "action not found")
+
+          def _login(body):
+              email    = body.get("email")
+              password = body.get("password")
+
+              if not email or not password:
+                  return _err(400, "email and password are required")
+
+              try:
+                  resp = cognito.initiate_auth(
+                      AuthFlow="USER_PASSWORD_AUTH",
+                      AuthParameters={"USERNAME": email, "PASSWORD": password},
+                      ClientId=USER_POOL_CLIENT,
+                  )
+              except cognito.exceptions.NotAuthorizedException:
+                  return _err(401, "invalid credentials")
+              except cognito.exceptions.UserNotConfirmedException:
+                  return _err(403, "account not verified")
+              except Exception as exc:
+                  return _err(500, f"authentication failed: {exc}")
+
+              auth_result = resp.get("AuthenticationResult", {})
+              session_id  = str(uuid.uuid4())
+              expires_at  = int(
+                  (datetime.now(timezone.utc) + timedelta(hours=EXPIRY_HOURS)).timestamp()
+              )
+
+              user_info = _get_user_info(auth_result.get("AccessToken", ""))
+
+              sessions.put_item(Item={
+                  "sessionId": session_id,
+                  "userId": user_info.get("sub", ""),
+                  "email": email,
+                  "createdAt": datetime.now(timezone.utc).isoformat(),
+                  "expiresAt": expires_at,
+              })
+
+              return _ok({
+                  "sessionId": session_id,
+                  "accessToken": auth_result.get("AccessToken"),
+                  "idToken": auth_result.get("IdToken"),
+                  "refreshToken": auth_result.get("RefreshToken"),
+                  "expiresIn": auth_result.get("ExpiresIn"),
+                  "user": user_info,
+              })
+
+          def _logout(event):
+              session_id = _extract_session(event)
+              if session_id:
+                  sessions.delete_item(Key={"sessionId": session_id})
+              return _ok({"loggedOut": True})
+
+          def _refresh(body):
+              refresh_token = body.get("refreshToken")
+              if not refresh_token:
+                  return _err(400, "refreshToken is required")
+
+              try:
+                  resp = cognito.initiate_auth(
+                      AuthFlow="REFRESH_TOKEN_AUTH",
+                      AuthParameters={"REFRESH_TOKEN": refresh_token},
+                      ClientId=USER_POOL_CLIENT,
+                  )
+              except Exception as exc:
+                  return _err(401, f"token refresh failed: {exc}")
+
+              auth_result = resp.get("AuthenticationResult", {})
+              return _ok({
+                  "accessToken": auth_result.get("AccessToken"),
+                  "idToken": auth_result.get("IdToken"),
+                  "expiresIn": auth_result.get("ExpiresIn"),
+              })
+
+          def _verify(event):
+              token = _extract_bearer(event)
+              if not token:
+                  return _err(401, "missing authorization token")
+              try:
+                  user = cognito.get_user(AccessToken=token)
+                  attrs = {a["Name"]: a["Value"] for a in user.get("UserAttributes", [])}
+                  return _ok({"valid": True, "username": user["Username"], "attributes": attrs})
+              except Exception:
+                  return _err(401, "invalid or expired token")
+
+          def _me(event):
+              token = _extract_bearer(event)
+              if not token:
+                  return _err(401, "missing authorization token")
+              user_info = _get_user_info(token)
+              if not user_info:
+                  return _err(401, "could not retrieve user information")
+              return _ok(user_info)
+
+          def _get_user_info(access_token):
+              if not access_token:
+                  return {}
+              try:
+                  resp = cognito.get_user(AccessToken=access_token)
+                  return {a["Name"]: a["Value"] for a in resp.get("UserAttributes", [])}
+              except Exception:
+                  return {}
+
+          def _extract_bearer(event):
+              headers = event.get("headers") or {}
+              auth = headers.get("Authorization") or headers.get("authorization", "")
+              if auth.startswith("Bearer "):
+                  return auth[7:]
+              return None
+
+          def _extract_session(event):
+              headers = event.get("headers") or {}
+              return headers.get("X-Session-Id") or headers.get("x-session-id")
+
+          def _ok(body, status=200):
+              return {"statusCode": status,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps(body, default=str)}
+
+          def _err(status, msg):
+              return {"statusCode": status,
+                      "headers": {"Content-Type": "application/json"},
+                      "body": json.dumps({"error": msg})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  AuthHandlerArn:
+    Value: !GetAtt AuthHandlerFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AuthHandlerArn"
+
+  AuthHandlerName:
+    Value: !Ref AuthHandlerFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-AuthHandlerName"

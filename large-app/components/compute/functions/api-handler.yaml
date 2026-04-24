@@ -1,0 +1,40 @@
+Resources:
+  ApiHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-api-handler-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiHandlerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiHandlerLogGroup
+    Properties:
+      FunctionName: !Sub "app-api-handler-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ApiHandlerRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: 30
+      Layers:
+        - !Ref UtilsLayer
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              method = event.get('httpMethod', 'GET')
+              path = event.get('path', '/')
+              return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'method': method, 'path': path})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment

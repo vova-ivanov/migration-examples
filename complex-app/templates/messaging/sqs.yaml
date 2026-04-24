@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SQS queues — jobs queue with DLQ, and priority queue
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  JobsVisibilityTimeoutSeconds:
+    Type: Number
+    Default: 300
+    Description: Visibility timeout for jobs queue (should be >= Lambda timeout)
+
+  MaxReceiveCount:
+    Type: Number
+    Default: 3
+    Description: Max receives before message moves to DLQ
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  # ── Dead Letter Queues ───────────────────────────────────────────────────────
+
+  JobsDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "app-jobs-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: QueueType
+          Value: dlq
+
+  PriorityDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "app-priority-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: QueueType
+          Value: dlq
+
+  # ── Jobs Queue ───────────────────────────────────────────────────────────────
+
+  JobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "app-jobs-${Environment}"
+      VisibilityTimeout: !Ref JobsVisibilityTimeoutSeconds
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt JobsDlq.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: QueueType
+          Value: jobs
+
+  # ── Priority Queue ───────────────────────────────────────────────────────────
+
+  PriorityQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "app-priority-${Environment}"
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 3600
+      ReceiveMessageWaitTimeSeconds: 5
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PriorityDlq.Arn
+        maxReceiveCount: 2
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: QueueType
+          Value: priority
+
+  # ── Queue Policies ───────────────────────────────────────────────────────────
+
+  JobsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref JobsQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource: !GetAtt JobsQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  PriorityQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref PriorityQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource: !GetAtt PriorityQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+Outputs:
+  JobsQueueUrl:
+    Value: !Ref JobsQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-JobsQueueUrl"
+
+  JobsQueueArn:
+    Value: !GetAtt JobsQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-JobsQueueArn"
+
+  JobsQueueName:
+    Value: !GetAtt JobsQueue.QueueName
+    Export:
+      Name: !Sub "${AWS::StackName}-JobsQueueName"
+
+  JobsDlqArn:
+    Value: !GetAtt JobsDlq.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-JobsDlqArn"
+
+  PriorityQueueUrl:
+    Value: !Ref PriorityQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-PriorityQueueUrl"
+
+  PriorityQueueArn:
+    Value: !GetAtt PriorityQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-PriorityQueueArn"

@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Step Functions state machine for multi-step batch processing workflows
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  WorkerFunctionArn:
+    Type: String
+    Description: ARN of the worker Lambda function
+
+  StatesRoleArn:
+    Type: String
+    Description: IAM role ARN for Step Functions execution
+
+  NotificationsTopicArn:
+    Type: String
+    Description: SNS topic ARN for workflow completion notifications
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+
+  # ── CloudWatch Log Group for executions ──────────────────────────────────────
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/states/app-batch-processor-${Environment}"
+      RetentionInDays: 30
+
+  # ── Batch Processing State Machine ───────────────────────────────────────────
+
+  BatchProcessorStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "app-batch-processor-${Environment}"
+      StateMachineType: STANDARD
+      RoleArn: !Ref StatesRoleArn
+      LoggingConfiguration:
+        Level: !If [IsProd, ERROR, ALL]
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      TracingConfiguration:
+        Enabled: !If [IsProd, true, false]
+      DefinitionString: !Sub
+        - |
+          {
+            "Comment": "Batch processing workflow with validation, processing, and notification",
+            "StartAt": "ValidateInput",
+            "States": {
+              "ValidateInput": {
+                "Type": "Task",
+                "Resource": "${WorkerArn}",
+                "Parameters": {
+                  "eventType": "batch.validate",
+                  "payload.$": "$"
+                },
+                "ResultPath": "$.validationResult",
+                "Retry": [
+                  {
+                    "ErrorEquals": ["Lambda.ServiceException", "Lambda.SdkClientException"],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                  }
+                ],
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "HandleValidationError",
+                    "ResultPath": "$.error"
+                  }
+                ],
+                "Next": "IsInputValid"
+              },
+              "IsInputValid": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.validationResult.valid",
+                    "BooleanEquals": true,
+                    "Next": "DetermineProcessingType"
+                  }
+                ],
+                "Default": "HandleValidationError"
+              },
+              "DetermineProcessingType": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.processingType",
+                    "StringEquals": "bulk",
+                    "Next": "ProcessBulk"
+                  },
+                  {
+                    "Variable": "$.processingType",
+                    "StringEquals": "report",
+                    "Next": "GenerateReport"
+                  }
+                ],
+                "Default": "ProcessSingle"
+              },
+              "ProcessBulk": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "MaxConcurrency": 5,
+                "Iterator": {
+                  "StartAt": "ProcessItem",
+                  "States": {
+                    "ProcessItem": {
+                      "Type": "Task",
+                      "Resource": "${WorkerArn}",
+                      "Parameters": {
+                        "eventType": "item.created",
+                        "payload.$": "$"
+                      },
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.ALL"],
+                          "IntervalSeconds": 5,
+                          "MaxAttempts": 2,
+                          "BackoffRate": 1.5
+                        }
+                      ],
+                      "End": true
+                    }
+                  }
+                },
+                "ResultPath": "$.bulkResults",
+                "Next": "NotifyCompletion"
+              },
+              "ProcessSingle": {
+                "Type": "Task",
+                "Resource": "${WorkerArn}",
+                "Parameters": {
+                  "eventType": "item.created",
+                  "payload.$": "$.item"
+                },
+                "ResultPath": "$.singleResult",
+                "Retry": [
+                  {
+                    "ErrorEquals": ["Lambda.ServiceException"],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                  }
+                ],
+                "Next": "NotifyCompletion"
+              },
+              "GenerateReport": {
+                "Type": "Task",
+                "Resource": "${WorkerArn}",
+                "Parameters": {
+                  "eventType": "report.requested",
+                  "payload.$": "$"
+                },
+                "ResultPath": "$.reportResult",
+                "TimeoutSeconds": 120,
+                "Next": "NotifyCompletion"
+              },
+              "NotifyCompletion": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sns:publish",
+                "Parameters": {
+                  "TopicArn": "${TopicArn}",
+                  "Message": {
+                    "eventType": "workflow.completed",
+                    "executionId.$": "$$.Execution.Id",
+                    "processingType.$": "$.processingType"
+                  },
+                  "MessageAttributes": {
+                    "eventType": {
+                      "DataType": "String",
+                      "StringValue": "job_completed"
+                    }
+                  }
+                },
+                "End": true
+              },
+              "HandleValidationError": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sns:publish",
+                "Parameters": {
+                  "TopicArn": "${TopicArn}",
+                  "Message": {
+                    "eventType": "workflow.failed",
+                    "executionId.$": "$$.Execution.Id",
+                    "error.$": "$.error"
+                  },
+                  "MessageAttributes": {
+                    "eventType": {
+                      "DataType": "String",
+                      "StringValue": "job_failed"
+                    }
+                  }
+                },
+                "Next": "WorkflowFailed"
+              },
+              "WorkflowFailed": {
+                "Type": "Fail",
+                "Error": "ValidationFailed",
+                "Cause": "Input validation did not pass"
+              }
+            }
+          }
+        - WorkerArn: !Ref WorkerFunctionArn
+          TopicArn: !Ref NotificationsTopicArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref BatchProcessorStateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachineArn"
+
+  StateMachineName:
+    Value: !GetAtt BatchProcessorStateMachine.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachineName"

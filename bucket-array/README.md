@@ -1,0 +1,3 @@
+# Looped resources being treated as individual resources
+
+CloudFormation has no native loop construct, so this stack emulates a variable-length array of S3 buckets by manually declaring `Bucket1` through `Bucket5`, each gated behind a condition. An import process that snapshots live state sees five independent bucket resources with no indication that they are conceptually a single parameterized collection. Without inspecting the source template, a migration tool cannot know that the count is controlled by a single `BucketCount` parameter and that the correct Pulumi representation is a loop — not five separate `aws.s3.Bucket` declarations. The only reliable way to recover this intent is to read the source repository.

@@ -1,0 +1,39 @@
+Resources:
+  AuthHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-auth-handler-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuthHandlerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AuthHandlerLogGroup
+    Properties:
+      FunctionName: !Sub "app-auth-handler-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AuthHandlerRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: 30
+      Layers:
+        - !Ref UtilsLayer
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              action = event.get('pathParameters', {}).get('action', 'unknown')
+              return {'statusCode': 200, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'action': action, 'authenticated': True})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment

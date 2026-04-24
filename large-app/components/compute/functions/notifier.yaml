@@ -1,0 +1,47 @@
+Resources:
+  NotifierLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/app-notifier-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  NotifierFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NotifierLogGroup
+    Properties:
+      FunctionName: !Sub "app-notifier-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt NotifierRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: 30
+      Layers:
+        - !Ref UtilsLayer
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      TracingConfig:
+        Mode: !If [XRayEnabled, Active, PassThrough]
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              message = event.get('Records', [{}])[0].get('Sns', {}).get('Message', '{}')
+              return {'statusCode': 200, 'body': json.dumps({'notified': True, 'message': message})}
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  NotifierSnsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt NotifierFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref NotificationsTopic

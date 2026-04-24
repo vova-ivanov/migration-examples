@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Lambda layers — shared utilities and third-party dependencies
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # ── Utils Layer ──────────────────────────────────────────────────────────────
+  # Content is a local directory; aws cloudformation package zips and uploads it.
+  # Directory layout: layers/utils/python/utils.py
+  # (Lambda Python layers must live under a "python/" prefix in the zip.)
+
+  UtilsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub "app-utils-${Environment}"
+      Description: Shared utility functions — logging, response helpers, validation
+      CompatibleRuntimes:
+        - python3.12
+        - python3.11
+      CompatibleArchitectures:
+        - x86_64
+        - arm64
+      Content: ../../layers/utils/
+
+  UtilsLayerPermission:
+    Type: AWS::Lambda::LayerVersionPermission
+    Properties:
+      Action: lambda:GetLayerVersion
+      LayerVersionArn: !Ref UtilsLayer
+      Principal: !Ref AWS::AccountId
+
+Outputs:
+  UtilsLayerArn:
+    Value: !Ref UtilsLayer
+    Export:
+      Name: !Sub "${AWS::StackName}-UtilsLayerArn"
