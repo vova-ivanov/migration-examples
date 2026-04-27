@@ -48,7 +48,6 @@ Resources:
       MinCapacity: 1
       MaxCapacity: !If [IsProd, 100, 10]
       ResourceId: !Sub "table/${ItemsTable}"
-      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable"
       ScalableDimension: dynamodb:table:ReadCapacityUnits
       ServiceNamespace: dynamodb
 
@@ -58,7 +57,6 @@ Resources:
       MinCapacity: 1
       MaxCapacity: !If [IsProd, 100, 10]
       ResourceId: !Sub "table/${ItemsTable}"
-      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable"
       ScalableDimension: dynamodb:table:WriteCapacityUnits
       ServiceNamespace: dynamodb
 
