@@ -1,0 +1,7 @@
+# Terraform data sources are invisible to AWS discovery
+
+Terraform data sources query existing AWS state or generate computed values at plan/apply time. They issue only read API calls, create no resources, and leave no footprint in the account. This configuration uses four data sources — `aws_caller_identity`, `aws_region`, `aws_iam_policy_document` (twice), and `aws_ssm_parameter` — to wire together the Lambda's IAM role and environment variables.
+
+After `terraform apply` the account contains a Lambda function, an IAM role with an inline policy, and two SSM parameters. All of those are real AWS resources and are visible to any discovery tool. What is invisible is everything the data sources contributed: the account ID and region baked into the IAM policy ARNs, the fact that the policy JSON was generated from an HCL template rather than written by hand, the SSM lookup that resolved `APP_CONFIG` to a static string before the Lambda was created, and the dependency chain connecting those computed values to the resources that consume them.
+
+A discovery pass that enumerates the Lambda's environment variables sees `ACCOUNT_ID`, `REGION`, and `APP_CONFIG` as plain strings with no indication they were computed values injected at apply time. Reconstructing the original intent requires reading the Terraform source to understand which values were static, which were looked up, and which were derived from other resources.

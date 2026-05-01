@@ -1,0 +1,7 @@
+# Terraform module hierarchy is invisible after deployment
+
+This configuration uses a local `lambda-app` module that packages an IAM execution role and a Lambda function together. The root configuration calls the module twice — once for a `processor` function and once for a `notifier` function — and wires both to a shared S3 bucket. The module accepts parameters for the function name, environment variables, extra IAM policy attachments, timeout, and tags.
+
+After `terraform apply` the account contains two Lambda functions, two IAM roles with two policy attachments each, one S3 bucket, and one IAM policy. All of those resources are visible to any discovery tool. What is invisible is the module boundary: nothing in the AWS API indicates that the two functions were stamped from the same template, that the `ROLE` environment variable is the intentional differentiator between the two instances, or that the shared S3 bucket is a deliberate cross-instance dependency rather than an accidental name collision.
+
+A migration tool that snapshots AWS resources and generates Pulumi code will produce two independent, copy-pasted resource blocks. The DRY abstraction encoded in the module — the fact that adding a third function would just be a third `module` call — is silently lost. Reconstructing the original intent requires reading the Terraform source to identify the module boundary and understand which parameters vary between instances.

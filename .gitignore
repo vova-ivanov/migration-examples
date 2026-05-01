@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Terraform: provider plugins, modules, lockfiles, state, and crash logs
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Built lambda artifacts
+**/lambda.zip

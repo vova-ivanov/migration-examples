@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Infrastructure layer for the mixed-unmanaged demo.
+  This stack owns the stateful resources (DynamoDB, S3, SQS).
+  The Lambda functions that consume these resources were added manually
+  via the AWS CLI and are not represented here.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # ── DynamoDB ──────────────────────────────────────────────────────────────
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "mixed-unmanaged-${Environment}-orders"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ── S3 ────────────────────────────────────────────────────────────────────
+
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "mixed-unmanaged-${Environment}-assets-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ── SQS ───────────────────────────────────────────────────────────────────
+
+  OrderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "mixed-unmanaged-${Environment}-orders"
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  OrderDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "mixed-unmanaged-${Environment}-orders-dlq"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+
+  OrdersTableName:
+    Value: !Ref OrdersTable
+    Export:
+      Name: !Sub "mixed-unmanaged-${Environment}-orders-table"
+
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
+    Export:
+      Name: !Sub "mixed-unmanaged-${Environment}-assets-bucket"
+
+  OrderQueueUrl:
+    Value: !Ref OrderQueue
+    Export:
+      Name: !Sub "mixed-unmanaged-${Environment}-order-queue-url"
+
+  OrderQueueArn:
+    Value: !GetAtt OrderQueue.Arn
+    Export:
+      Name: !Sub "mixed-unmanaged-${Environment}-order-queue-arn"

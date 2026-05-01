@@ -1,0 +1,7 @@
+# Complex unmanaged application — relationships must be inferred
+
+This application is a simple CRUD API backed by DynamoDB and S3. Every resource — the DynamoDB table (with a GSI), the S3 bucket, the IAM role with its inline and managed policies, the Lambda function, and the API Gateway HTTP API with five routes — was created directly through the AWS CLI with no CloudFormation stack involved.
+
+The discovery challenge scales with the number of resources. For a single Lambda the only relationship to reconstruct is the IAM trust. Here there are two data dependencies (Lambda reads and writes the DynamoDB table; Lambda generates presigned S3 URLs), a routing dependency (API Gateway must know the Lambda ARN to create the integration), and a permissions dependency (Lambda needs specific DynamoDB and S3 ARNs in its execution role). None of these relationships appear in any stack; they must be inferred by cross-referencing the Lambda's environment variables, the IAM inline policy, the API Gateway integration, and the resource-based policy Lambda grants to API Gateway.
+
+The GSI on the DynamoDB table (`status-index`) is a further edge case: it was declared as part of the CLI `create-table` call and is visible in the table description, but a discovery tool that imports the table as a plain resource may omit the index unless it specifically inspects the `GlobalSecondaryIndexes` field and maps it to the equivalent Pulumi attribute.

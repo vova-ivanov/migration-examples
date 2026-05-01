@@ -1,0 +1,9 @@
+# Mixed managed and unmanaged resources
+
+This application has two distinct deployment layers that use different tooling and have no shared state.
+
+The first layer is a CloudFormation stack that owns the stateful infrastructure: a DynamoDB table with a GSI, a versioned S3 bucket, an SQS queue, and a dead-letter queue. These resources were created with `aws cloudformation deploy` and are fully tracked in the stack; the stack exports their names and ARNs for other systems to consume.
+
+The second layer consists of two Lambda functions — an API handler and an async order worker — that were added directly via the AWS CLI. They are not part of any stack. The API function reads and writes DynamoDB and publishes to SQS; the worker is wired to the queue via an event source mapping and writes processed receipts to S3. A separate API Gateway HTTP API, also created via the CLI, fronts the API function.
+
+The migration challenge is two-fold. A stack-discovery pass will find the DynamoDB table, S3 bucket, and SQS queues and correctly attribute them to the `mixed-unmanaged-infra` stack. It will find nothing else; the Lambda functions, the IAM role, the event source mapping, and the API Gateway are invisible to stack-based discovery. An account-level resource scan will find all the resources but will have no way to determine that they belong to the same logical application: the Lambda functions and API Gateway carry no stack reference, and the DynamoDB table and S3 bucket are tagged `ManagedBy: CloudFormation` while the Lambda functions are not tagged at all. The cross-layer dependencies — Lambda's IAM policy grants access to specific DynamoDB and S3 ARNs from the stack, the event source mapping references the SQS queue ARN — are the only evidence that these two layers form a single system, and recovering that evidence requires reading both the stack outputs and the Lambda configuration side by side.
